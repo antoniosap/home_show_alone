@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <NeoPixelBus.h>
+#include <NeoPixelAnimator.h>
 #include <json.h>
 #include "secrets.h"
 
@@ -16,7 +17,13 @@ char topicCommand[] = "tele/tasmota_A6C75F/SENSOR";
 WiFiClient wificlient;
 PubSubClient mqttclient(wificlient);
 
-#define         PIXEL_COUNT         (8 * 64)
+// make sure to set these panel values to the sizes of yours
+const uint8_t PanelWidth  = 64;  // n pixel x m pixel matrix of leds
+const uint8_t PanelHeight = 8;
+const uint8_t TileWidth   = 1;  // laid out in n1 panels x m2 panels mosaic
+const uint8_t TileHeight  = 1;
+
+#define         PIXEL_COUNT         (PanelWidth * PanelHeight * TileWidth * TileHeight)
 #define         PIXEL_PIN           22
 #define         COLOR_SATURATION    10
 
@@ -30,12 +37,112 @@ RgbColor blue(0, 0, COLOR_SATURATION);
 RgbColor white(COLOR_SATURATION);
 RgbColor black(0);
 
-HslColor hslRed(red);
-HslColor hslGreen(green);
-HslColor hslBlue(blue);
-HslColor hslWhite(white);
-HslColor hslBlack(black);
+typedef ColumnMajorAlternatingLayout MyPanelLayout;
+NeoRgbwCurrentSettings settings = NeoRgbwCurrentSettings(1, 1, 1, 1);
+NeoPixelAnimator animations(PIXEL_COUNT, NEO_CENTISECONDS);
 
+typedef ColumnMajorLayout MyTilesLayout;
+NeoTiles <MyPanelLayout, MyTilesLayout> tiles(
+    PanelWidth,
+    PanelHeight,
+    TileWidth,
+    TileHeight);
+
+//----------------------------------------------------------------------------------
+#include <stdint.h>
+#include "font8x8_ib8x8u.ino"
+#include "font8x8_ic8x8u.ino"
+
+#define FONT8X8 font8x8_ic8x8u
+
+const uint8_t *getImage(uint8_t ch)
+{
+    if (ch < 128) {
+      return FONT8X8[ch];
+    }
+    if (ch >= 128 && ch < 160) {
+      // miscellaneous
+      ch -= 128;
+      if (ch < sizeof(FONT8X8) / 8) {
+        return FONT8X8[ch];
+      }
+      return FONT8X8[0]; // valeur par défaut
+    }
+    return FONT8X8[ch - 160 + 128];
+}
+
+void rotateChar90(const uint8_t *image, uint8_t newb[8])
+{
+    for (int i = 0; i < 8; ++i)
+    {
+        newb[i] = 0;
+        for (int j = 0; j < 8; ++j)
+        {
+            uint8_t b = pgm_read_byte_near(image + j);
+            newb[i] |= (b & (1 << i)) ? 1 << (7 - j) : 0;
+        }
+    }
+}
+
+void rotateChar270(const uint8_t *image, uint8_t newb[8])
+{
+    for (int i = 0; i < 8; ++i)
+    {
+        newb[i] = 0;
+        for (int j = 0; j < 8; ++j)
+        {
+            uint8_t b = pgm_read_byte_near(image + j);
+            newb[i] |= (b & (1 << (7 - i))) ? 1 << j : 0;
+        }
+    }
+}
+
+uint8_t printChar(uint8_t ch, uint16_t cursor)
+{
+    const uint8_t *image = getImage(ch);
+    uint8_t newb1[8];
+
+    rotateChar270(image, newb1);
+    for (int i = 0; i < 8; i++) {
+        uint8_t b = newb1[i];
+        uint8_t mask = 1;
+
+        for (int j = 0; j < 8; j++) {
+          if (b & mask) {
+            strip.SetPixelColor(tiles.Map(cursor, j), white);
+          } else {
+            strip.SetPixelColor(tiles.Map(cursor, j), black);
+          }
+          mask <<= 1;
+        }
+        cursor++;
+    }
+    return cursor;
+}
+
+// void StrBase::printString(LedControl &lc, unsigned long wait, uint8_t rotate) const
+// {
+//     for (size_t i = 0; i < length(); ++i)
+//     {
+//         printChar(lc, at(i), rotate);
+//         delay(wait);
+//     }
+// }
+
+// // wrappers
+
+// // PROGMEM strings
+// void displayString_P(LedControl &lc, const char *str, unsigned long wait, bool scroll, uint8_t rotate)
+// {
+//     StrP(str).displayString(lc, wait, scroll, rotate);
+// }
+
+// // DATA strings
+// void displayString(LedControl &lc, const char *str, unsigned long wait, bool scroll, uint8_t rotate)
+// {
+//     StrD(str).displayString(lc, wait, scroll, rotate);
+// }
+//----------------------------------------------------------------------------------
 
 void wifiConnect() {
   WiFi.begin(ssid, pass);
@@ -130,6 +237,45 @@ void ledInit() {
 
 }
 
+void ledTestLights(RgbColor color) {
+  // set the colors, 
+  // if they don't match in order, you need to use NeoGrbFeature feature
+  // auto maTotal = strip.CalcTotalMilliAmpere(NeoRgbwCurrentSettings(1, 1, 1, 1));
+  for (int i = 0; i < PIXEL_COUNT; ++i) {
+    strip.SetPixelColor(i, color);
+    strip.Show();
+    strip.SetPixelColor(i, black);
+    strip.Show();
+  }
+}
+
+void ledTestLightsAll() {
+  ledTestLights(red);
+  ledTestLights(green);
+  ledTestLights(blue);
+  ledTestLights(white);
+}
+
+void ledTestTiles() {
+  // use the topo to map the 2d cordinate to the pixel
+  // and use that to SetPixelColor
+  const uint16_t left = 0;
+  const uint16_t right = PanelWidth - 1;
+  const uint16_t top = 0;
+  const uint16_t bottom = PanelHeight - 1;
+
+  strip.SetPixelColor(tiles.Map(left, top), white);
+  strip.SetPixelColor(tiles.Map(right, top), red);
+  strip.SetPixelColor(tiles.Map(right, bottom), green);
+  strip.SetPixelColor(tiles.Map(left, bottom), blue);
+  strip.Show();
+}
+
+void ledClearToBlack() {
+  strip.ClearTo(black);
+  strip.Show();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -144,6 +290,26 @@ void setup() {
   //wifiConnect();
   //wifiData();
   //mqttConnect();
+
+  //ledTestLightsAll();
+  ledTestTiles();
+  delay(5000);
+
+  uint16_t cursor = 0;
+
+  cursor = printChar('A', cursor);
+  strip.Show();
+  delay(1000);
+
+  cursor = printChar('0', cursor);
+  strip.Show();
+  delay(1000);
+
+  cursor = printChar('1', cursor);
+  strip.Show();
+  
+  //delay(5000);
+  //ledClearToBlack();
 }
 
 void loop() {
@@ -151,19 +317,4 @@ void loop() {
   //   mqttReconnect();
   // }
   // mqttclient.loop();
-
-  // set the colors, 
-  // if they don't match in order, you need to use NeoGrbFeature feature
-  for (int i = 0; i < PIXEL_COUNT; ++i) {
-    strip.SetPixelColor(i, red);
-    //v.Show();
-    strip.SetPixelColor(i, green);
-    //strip.Show();
-    strip.SetPixelColor(i, blue);
-    //strip.Show();
-    strip.SetPixelColor(i, white);
-    strip.Show();
-    strip.SetPixelColor(i, black);
-    strip.Show();
-  }
 }
